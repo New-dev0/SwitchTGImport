@@ -75,9 +75,16 @@ def downloadFile(fileId):
 
 @run_async
 def searchLink(chatUsername, message):
-    req = tg.call_method(
-        "getMessageLinkInfo", {"url": f"https://t.me/{chatUsername}/{message}"}
-    )
+    try:
+        intChatId = int(chatUsername)
+        if chatUsername.startswith("-100"):
+            chatUsername = chatUsername.replace("-100", "")
+
+        req = tg.call_method("getMessageLinkInfo", {"url": f"https://t.me/c/{chatUsername}/{message}"})
+    except ValueError:
+        req = tg.call_method(
+            "getMessageLinkInfo", {"url": f"https://t.me/{chatUsername}/{message}"}
+        )
     req.wait()
     return req.update
 
@@ -100,7 +107,15 @@ def searchChat():
 async def StartM(ctx: BotContext[CommandEvent]):
     m = ctx.event.message
     await m.reply_text(
-        "Hi, I am telegram forwarder bot\n\n`/copy username startId endId`"
+        "👋 Hello! I'm a Telegram-Switch Message Forwarder Bot\n\n"
+        "I can help you copy messages from public Telegram channels.\n\n"
+        "📝 **Usage:**\n"
+        "`/copy username startId endId`\n\n"
+        "Where:\n"
+        "• `username` - Channel username or ID\n" 
+        "• `startId` - First message ID to copy\n"
+        "• `endId` - Last message ID to copy\n\n"
+        "Example: `/copy telegram 1000 1010`"
     )
 
 
@@ -110,6 +125,9 @@ async def copyMessages(ctx: BotContext[CommandEvent]):
     param = ctx.event.params
     if not param:
         return await m.reply_text("Provide copy query!")
+    
+    downloaded_files = []  # Track files that need cleanup
+    
     try:
         split = param.split()
         chatUsername = split[0].split("/")[-1]
@@ -121,93 +139,112 @@ async def copyMessages(ctx: BotContext[CommandEvent]):
     timer = Timer()
 
     msg = await m.send("Task Started!")
-    for message in range(msgStart, msgEnd):
-        try:
-            update = await searchLink(chatUsername, message)
-            if not update:
-                continue
-            buttons = []
-            if update["message"].get("reply_markup"):
-                dtd = update["message"]["reply_markup"]
-                for row in dtd["rows"]:
-                    rowbuttons = []
-                    for button in row:
-                        if (
-                            button["@type"] == "inlineKeyboardButton"
-                            and button["type"]["@type"] == "inlineKeyboardButtonTypeUrl"
-                        ):
-                            rowbuttons.append(
-                                InlineKeyboardButton(
-                                    button["text"], url=button["type"]["url"]
+    try:
+        for message in range(msgStart, msgEnd):
+            try:
+                update = await searchLink(chatUsername, message)
+                if not update:
+                    continue
+                buttons = []
+                if update["message"].get("reply_markup"):
+                    dtd = update["message"]["reply_markup"]
+                    for row in dtd["rows"]:
+                        rowbuttons = []
+                        for button in row:
+                            if (
+                                button["@type"] == "inlineKeyboardButton"
+                                and button["type"]["@type"] == "inlineKeyboardButtonTypeUrl"
+                            ):
+                                rowbuttons.append(
+                                    InlineKeyboardButton(
+                                        button["text"], url=button["type"]["url"]
+                                    )
                                 )
-                            )
-                    if rowbuttons:
-                        buttons.append(rowbuttons)
+                        if rowbuttons:
+                            buttons.append(rowbuttons)
 
-            __msg = update["message"]["content"]
-            if __msg["@type"] == "messageText":
-                message = __msg["text"]
-            else:
-                message = __msg.get("caption", {})
-            print(message)
-            if message:
-                try:
-                    message = await parseMarkdown(message)
-                except Exception as er:
-                    print(er)
-            #            print(__msg)
-            path = None
-
-            try:
-                if __msg["@type"] == "messagePhoto":
-                    fileId = __msg["photo"]["sizes"][-1]["photo"]["id"]
-                elif __msg["@type"] == "messageDocument":
-                    fileId = __msg["document"]["document"]["id"]
-                elif __msg["@type"] == "messageAnimation":
-                    fileId = __msg["animation"]["animation"]["id"]
-                elif __msg["@type"] == "messageVideo":
-                    fileId = __msg["video"]["video"]["id"]
-                elif __msg["@type"] == "messageSticker":
-                    fileId = __msg["sticker"]["sticker"]["id"]
+                __msg = update["message"]["content"]
+                if __msg["@type"] == "messageText":
+                    message = __msg["text"]
                 else:
-                    print(__msg)
-                    fileId = None
-                assert fileId != None
-                updateFileHandler[fileId] = msg.id
-                file = await downloadFile(fileId)
-                path = file["local"]["path"]
-            except (KeyError, AssertionError) as er:
-                print(er)
-            except Exception as er:
-                print(er)
+                    message = __msg.get("caption", {})
+                print(message)
+                if message:
+                    try:
+                        message = await parseMarkdown(message)
+                    except Exception as er:
+                        print(er)
+                #            print(__msg)
+                path = None
 
-            async def uploadCallback(upl: UploadProgress):
-                if not timer.can_send():
-                    return
-                perc = round((upl.readed / upl.total) * 100, 2)
+                try:
+                    if __msg["@type"] == "messagePhoto":
+                        fileId = __msg["photo"]["sizes"][-1]["photo"]["id"]
+                    elif __msg["@type"] == "messageDocument":
+                        fileId = __msg["document"]["document"]["id"]
+                    elif __msg["@type"] == "messageAnimation":
+                        fileId = __msg["animation"]["animation"]["id"]
+                    elif __msg["@type"] == "messageVideo":
+                        fileId = __msg["video"]["video"]["id"]
+                    elif __msg["@type"] == "messageSticker":
+                        fileId = __msg["sticker"]["sticker"]["id"]
+                    else:
+                        print(__msg)
+                        fileId = None
+                    assert fileId != None
+                    updateFileHandler[fileId] = msg.id
+                    file = await downloadFile(fileId)
+                    path = file["local"]["path"]
+                    if path:
+                        downloaded_files.append(path)
+                except (KeyError, AssertionError) as er:
+                    logging.error(f"Error handling file: {er}")
+                except Exception as er:
+                    logging.error(f"Unexpected error handling file: {er}")
 
-                name = os.path.basename(upl.path)
-                message = f"""
+                async def uploadCallback(upl: UploadProgress):
+                    if not timer.can_send():
+                        return
+                    perc = round((upl.readed / upl.total) * 100, 2)
+
+                    name = os.path.basename(upl.path)
+                    message = f"""
     *Uploading* `{name}`!\n\n{get_progress_bar(perc)} [{humanbytes(upl.readed)}/{humanbytes(upl.total)}]"""
-                await msg.edit_text(message)
+                    await msg.edit_text(message)
 
-            await m.reply_text(
-                document=path,
-                message=message or "",
-                progress=uploadCallback,
-                task_count=TASK_COUNT,
-                part_size=10 * 10 * 1024,
-                inline_markup=InlineMarkup(buttons) if buttons else None,
-                quote=False
-            )
-            print(message)
-            try:
-                os.remove(path)
+                await m.reply_text(
+                    document=path,
+                    message=message or "",
+                    progress=uploadCallback,
+                    task_count=TASK_COUNT,
+                    part_size=10 * 10 * 1024,
+                    inline_markup=InlineMarkup(buttons) if buttons else None,
+                    quote=False
+                )
+                
+                # Clean up file after sending
+                if path and path in downloaded_files:
+                    try:
+                        os.remove(path)
+                        downloaded_files.remove(path)
+                        logging.info(f"Successfully cleaned up file: {path}")
+                    except OSError as e:
+                        logging.error(f"Error removing file {path}: {e}")
+                
             except Exception as er:
-                print(er)
-        except Exception as er:
-            print(er, message)
-    await msg.delete()
+                logging.error(f"Error processing message {message}: {er}")
+                
+    finally:
+        # Clean up any remaining files
+        for path in downloaded_files:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    logging.info(f"Cleaned up remaining file: {path}")
+            except OSError as e:
+                logging.error(f"Failed to clean up file {path}: {e}")
+        
+        await msg.delete()
 
 
 timer = Timer()
@@ -244,5 +281,6 @@ def onFileUpdate(x):
 
 # asyncio.run(main())
 tg.add_update_handler("updateFile", onFileUpdate)
+
 
 client.run()
